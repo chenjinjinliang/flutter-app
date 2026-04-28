@@ -1,68 +1,186 @@
 import 'dart:convert';
-
 import 'package:bot_toast/bot_toast.dart';
 import 'package:bbmusic/origin_sdk/bili/utils.dart';
 import 'package:bbmusic/utils/logs.dart';
 import 'package:dio/dio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../origin_types.dart';
-import './sign.dart';
 import './types.dart';
-import './ticket.dart';
 
-const _userAgent =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const _userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const _referer = "https://www.bilibili.com/";
-const _cacheCreatedAtKey = "bili_catch_created_at";
-const _signImgKey = "bili_sign_img_key";
-const _signSubKey = "bili_sign_sub_key";
-const _ticketKey = "bili_ticket";
-const _spiB3 = "bili_spi_b3";
-const _spiB4 = "bili_spi_b4";
-const _cacheVersionKey = 'bili_cache_version';
-const _cacheVersionValue = '4';
+
+// ==================== 您的 API 配置（在这里修改） ====================
+const _searchBaseUrl = "http://83.229.122.198:8889/api/bilibili/search";
+const _bparseUrl = "https://api.injahow.cn/bparse/";
+// =====================================================================
 
 class BiliClient implements OriginService {
   final dio = Dio();
 
-  SignData? signData;
-  SpiData? spiData;
-  String? ticket;
-  String? bNut;
-
-  // bNut 缓存
-  BiliBNut? _bNutCache;
-  DateTime? _bNutCacheTime;
-
   BiliClient() {
     dio.options.headers["UserAgent"] = _userAgent;
     dio.options.headers["Referer"] = _referer;
-    // dio.options.headers['Origin'] = "https://space.bilibili.com";
+
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (RequestOptions options, RequestInterceptorHandler handler) {
-          final cookies = [
-            // "buvid4=${spiData?.b4};",
-            // "buvid3=${spiData?.b3};",
-          ];
-          if (options.uri.path.startsWith("/x/player/wbi/playurl")) {
-            // cookies.add("bili_ticket=$ticket;");
-          } else {
-            cookies.add("buvid4=${spiData?.b4};");
-            cookies.add("buvid3=${spiData?.b3};");
-            cookies.add("bili_ticket=$ticket;");
-            cookies.add("b_nut=$bNut;");
-            final cookie = cookies.join(" ");
-            logs.i('Cookie: ', error: {"Cookie": cookie});
-            options.headers["cookie"] = cookie;
-          }
-          // cookies.add("buvid4=${spiData?.b4};");
-          // cookies.add("buvid3=${spiData?.b3};");
-          // cookies.add("bili_ticket=$ticket;");
-          // cookies.add("b_nut=$bNut;");
           logs.i('OnRequest:', error: {
             "path": options.uri.path,
             "url": options.uri.toString(),
+          });
+          return handler.next(options);
+        },
+        onError: (DioException error, ErrorInterceptorHandler handler) {
+          return handler.next(error);
+        },
+        onResponse: (Response response, ResponseInterceptorHandler handler) {
+          final logData = {
+            "url": response.realUri.toString(),
+            "data": response.data,
+            "statusCode": response.statusCode,
+          };
+          logs.i("bili: OnResponse", error: logData);
+
+          if (response.statusCode! < 200 || response.statusCode! > 300) {
+            BotToast.showText(
+              text: '请求失败: ${response.statusCode} ${response.statusMessage}',
+            );
+            throw DioException(
+              requestOptions: response.requestOptions,
+              response: response,
+              error: logData,
+              type: DioExceptionType.badResponse,
+            );
+          }
+
+          if (response.data is! Map) {
+            return handler.next(response);
+          }
+
+          final code = response.data['code'];
+          final message = response.data['message'];
+          final resData = response.data['data'];
+
+          if (code != null && code != 0) {
+            BotToast.showText(text: '请求失败: $message');
+            logs.e('bili: 请求失败', error: logData);
+            throw DioException(
+              requestOptions: response.requestOptions,
+              response: response,
+              error: logData,
+              type: DioExceptionType.badResponse,
+            );
+          }
+
+          // 风控检测
+          if (resData != null && resData['v_voucher'] != null) {
+            BotToast.showText(text: '请求失败，触发风控，请稍后重试');
+            logs.e('bili: 请求失败, 触发风控', error: logData);
+            throw DioException(
+              requestOptions: response.requestOptions,
+              response: response,
+              error: logData,
+              type: DioExceptionType.badResponse,
+            );
+          }
+
+          return handler.next(response);
+        },
+      ),
+    );
+  }
+
+  // ==================== 搜索（使用您的后端代理） ====================
+  @override
+  Future<SearchResponse> search(SearchParams params) async {
+    final query = {
+      'keyword': params.keyword,
+      'page': params.page.toString(),
+    };
+    final apiPath = Uri.parse(_searchBaseUrl).replace(queryParameters: query).toString();
+    try {
+      final response = await dio.get(apiPath);
+      return BiliSearchResponse.fromJson(response.data);
+    } catch (e) {
+      logs.e("搜索失败", error: e);
+      return BiliSearchResponse(
+        current: 0,
+        total: 0,
+        pageSize: 0,
+        data: [],
+      );
+    }
+  }
+
+  // ==================== 搜索条目详情 ====================
+  @override
+  Future<SearchItem> searchDetail(String id) async {
+    BiliId biliid = BiliId.unicode(id);
+    // 详情接口继续使用您后端代理的 view 接口
+    final query = {'bvid': biliid.bvid};
+    final apiPath = Uri.parse('http://83.229.122.198:8889/api/bilibili/view')
+        .replace(queryParameters: query)
+        .toString();
+    final response = await dio.get(apiPath);
+    final data = response.data['data'];
+    return BiliSearchItem.fromJson(data);
+  }
+
+  // ==================== 搜索建议 ====================
+  @override
+  Future<List<SearchSuggestItem>> searchSuggest(String keyword) async {
+    // 搜索建议暂时返回空列表，或可自行扩展
+    return [];
+  }
+
+  // ==================== 获取音乐播放地址（使用 bparse 解析） ====================
+  @override
+  Future<MusicUrl> getMusicUrl(String id) async {
+    BiliId biliid = BiliId.unicode(id);
+    final bvid = biliid.bvid;
+
+    // 优先尝试 16 (360P)，降级尝试 32 (480P)
+    final qualities = [16, 32];
+    for (final q in qualities) {
+      try {
+        final query = {
+          'bv': bvid,
+          'p': '1',
+          'q': q.toString(),
+          'format': 'mp4',
+          'otype': 'json',
+        };
+        final apiPath = Uri.parse(_bparseUrl).replace(queryParameters: query).toString();
+        final response = await dio.get(apiPath);
+        final data = response.data;
+
+        if (data['code'] == 0 && data['url'] != null) {
+          logs.i('bparse 解析成功', error: {'quality': q, 'url': data['url']});
+          return MusicUrl(
+            url: data['url'],
+            headers: {'Referer': _referer},
+          );
+        }
+      } catch (e) {
+        logs.e('bparse 解析失败 (q=$q)', error: e);
+      }
+    }
+
+    throw Exception('无法解析该视频，所有清晰度均失败');
+  }
+
+  // ==================== 歌单广场（暂不修改） ====================
+  @override
+  Future<List<MusicOrderItem>> getMusicOrderSquare(int current, int pageSize) async {
+    // 保持原有逻辑或返回空列表
+    return [];
+  }
+
+  @override
+  Future<MusicOrderItem> getMusicOrderDetail(String id, {int page = 1}) async {
+    throw UnimplementedError();
+  }
+}            "url": options.uri.toString(),
             "Cookie": options.headers["cookie"],
           });
           return handler.next(options);
