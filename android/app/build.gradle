@@ -26,7 +26,7 @@ apply plugin: 'kotlin-android'
 apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
-    namespace "com.bbmusic"          // 请修改为你的实际包名
+    namespace "com.ryanheise.audioservice.AudioServiceActivity"          // 请修改为你的实际包名
     compileSdkVersion 34
 
     compileOptions {
@@ -43,7 +43,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.bbmusic"   // 请修改为你的实际包名
+        applicationId "com.ryanheise.audioservice.AudioServiceActivity"   // 请修改为你的实际包名
         minSdkVersion 21
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
